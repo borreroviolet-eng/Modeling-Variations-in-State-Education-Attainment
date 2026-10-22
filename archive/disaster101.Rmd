@@ -1,0 +1,169 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup libraries, importing csv, factorizing necessary variables }
+library(readxl)
+library(ggplot2)
+library(GGally)
+library(labelled)
+library(ResourceSelection)
+library(pROC)
+library(plyr)
+library(sensemakr)
+
+# import excel workbook
+state_data <- read_excel("C:/easy/MAT430_Education.xlsx",
+                         sheet="all_data_sans_dc")
+
+# convert necessary vars to factor
+sdata <- within(state_data, {
+  loc <- factor(loc)
+  mand_attend_age <- factor(mand_attend_age)
+  dist_req_k_offered <- factor(dist_req_k_offered)
+  k_attend_req <- factor(k_attend_req)
+  knowledge_exam <- factor(knowledge_exam)
+  teaching_skill_exam <- factor(teaching_skill_exam)
+})
+```
+
+THOMAS HOPPER PRESS and PRED_R\^2 Functions
+
+```{r}
+#' @title PRESS
+#' @author Thomas Hopper
+#' @description Returns the PRESS statistic (predictive residual sum of squares).
+#'              Useful for evaluating predictive power of regression models.
+#' @param linear.model A linear regression model (class 'lm'). Required.
+#' 
+PRESS <- function(linear.model) {
+  #' calculate the predictive residuals
+  pr <- residuals(linear.model)/(1-lm.influence(linear.model)$hat)
+  #' calculate the PRESS
+  PRESS <- sum(pr^2)
+  
+  return(PRESS)
+}
+```
+
+```{r}
+#' @title Predictive R-squared
+#' @author Thomas Hopper
+#' @description returns the predictive r-squared. Requires the function PRESS(), which returns
+#'              the PRESS statistic.
+#' @param linear.model A linear regression model (class 'lm'). Required.
+#'
+pred_r_squared <- function(linear.model) {
+  #' Use anova() to get the sum of squares for the linear model
+  lm.anova <- anova(linear.model)
+  #' Calculate the total sum of squares
+  tss <- sum(lm.anova$'Sum Sq')
+  # Calculate the predictive R^2
+  pred.r.squared <- 1-PRESS(linear.model)/(tss)
+  
+  return(pred.r.squared)
+}
+```
+
+```{r}
+#' @title Model Fit Statistics
+#' @description Returns lm model fit statistics R-squared, adjucted R-squared,
+#'      predicted R-squared and PRESS.
+#'      Thanks to John Mount for his 6-June-2014 blog post, R style tip: prefer functions that return data frames" for
+#'      the idea \link{http://www.win-vector.com/blog/2014/06/r-style-tip-prefer-functions-that-return-data-frames}
+#' @return Returns a data frame with one row and a column for each statistic
+#' @param linear.model A \code{lm()} model.
+model_fit_stats <- function(linear.model) {
+  r.sqr <- summary(linear.model)$r.squared
+  adj.r.sqr <- summary(linear.model)$adj.r.squared
+  pre.r.sqr <- pred_r_squared(linear.model)
+  PRESS <- PRESS(linear.model)
+  return.df <- data.frame(r.squared = r.sqr, adj.r.squared = adj.r.sqr, pred.r.squared = pre.r.sqr, press = PRESS)
+  return(return.df)
+}
+```
+
+```{r sdata_var_labels}
+
+#generate list of variable labels in main frame
+
+#tq frame
+var_label(sdata) <- list( 
+  loc = "State",
+  per_hs = "Percent of Pop with High School Diploma by 25",
+  per_ba = "Percent of Pop with Bachelors Degree by 25",
+  read_avg = "NAEP READ Average Score",
+  read_moe_navg = "Did State Meet or Exceed Nat'l Avg in Reading?",
+  read_per_basic= "NAEP READ Percent at Basic or Higher",
+  read_per_prof= "NAEP READ Percent at Proficient or Higher",
+  math_avg = "NAEP MATH Average Score",
+  math_moe_navg = "Did State Meet or Exceed Nat'l Avg in Math?",
+  math_per_basic= "NAEP MATH Percent at Basic or Higher",
+  math_per_prof= "NAEP MATH Percent at Proficient or Higher",
+  both_moe_navg = "Did State Meet or Exceed Nat'l Avg in Both Subjects?",
+  percap_total= "State Total Spending Per Capita",
+  percap_prim_ed= "State Spending on Primary Education Per Capita",
+  percap_higher_ed= "State Spending on Primary Education Per Capita",
+  teacher_pay= "Average Teacher Salary (National Avg - 1)",
+  pup_teach_ratio= "Average Pupil to Teacher Ratio",
+  fte_teacher_total= "Total Full-time Equivalent Teachers in State",
+  min_hours_by8th = "Minimum Instructional Hours by 8th Grade",
+  mand_attend_age= "Compulsory Attendance Age",
+  dist_req_k_offered= "State mandates for kindergarten offerings",
+  k_attend_req= "Is kindergarten attendance required?",
+  knowledge_exam = "Knowledge Exam Requirements for Cert.",
+  teaching_skill_exam = "Teaching Skill Exam Requirements for Cert.",
+  dem_rep_ratio_16 = "Total Votes Cast Ratio 2016 (D:R)",
+  dem_rep_ratio_20 = "Total Votes Cast Ratio 2020 (D:R)",
+  dtr_shift = "Shift in D:R Ratio 2016-2020",
+  percap_title1_funds = "Title 1 Funds Per Student",
+  poverty_rate = "Percent of State Pop in Poverty 2018"
+)
+```
+
+```{r}
+vtc <- c("per_ba","teacher_pay","pup_teach_ratio","dem_rep_ratio_20","poverty_rate","percap_title1_funds")
+seed_frame <- sdata[vtc]
+generate_plots(seed_frame)
+```
+
+```{r}
+#noting that the political element shows many corrleations
+#as does poverty rates. Considering an econ/politics focus for one model and early ed/econ for another, then politics and teacher quality (amorphous though that is)
+
+pb_pov_only <- lm(per_ba ~ poverty_rate, data = sdata)
+
+pb_econ <- lm(per_ba ~ poverty_rate + pup_teach_ratio +
+                   dem_rep_ratio_20, data = sdata)
+
+pb_econ_pe <- lm(per_ba ~ poverty_rate + teacher_pay + pup_teach_ratio +
+                   dem_rep_ratio_20, data = sdata)
+
+
+assess_lm(pb_econ_pe)
+
+ldply(list(pb_econ, pb_econ_pe), model_fit_stats)
+```
+
+SENSITIVITY ANALYSIS USING SENSEMAKR
+
+Following the process outlined here: <https://cran.r-project.org/web/packages/sensemakr/vignettes/sensemakr.html>
+
+```{r sensemakr application to final model}
+
+poverty_sensitivity <- sensemakr(model = pb_econ_pe,
+                                treatment = "poverty_rate",
+                                benchmark_covariates = "dem_rep_ratio_20",
+                                kd = 1:3 ,
+                                reduce = TRUE)
+
+summary(poverty_sensitivity)
+plot(poverty_sensitivity, sensitivity.of = "t-value")
+
+```
+
+```{r niceplots and final project materials below}
+
+
+```

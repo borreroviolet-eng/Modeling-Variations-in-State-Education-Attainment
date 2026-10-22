@@ -1,0 +1,188 @@
+---
+title: "MAT 430 Final Project"
+output: html_notebook
+---
+
+INITIALIZATION
+
+```{r setup libraries, importing csv, factorizing necessary variables }
+library(readxl)
+library(ggplot2)
+library(GGally)
+library(labelled)
+library(ResourceSelection)
+library(pROC)
+library(plyr)
+
+# import excel workbook
+state_data <- read_excel("C:/easy/mat430_working_data11-30.xlsx",sheet="all_data_sans_dc")
+
+# convert necessary vars to factor
+sdata <- within(state_data, {
+  loc <- factor(loc)
+  mand_attend_age <- factor(mand_attend_age)
+  dist_req_k_offered <- factor(dist_req_k_offered)
+  k_attend_req <- factor(k_attend_req)
+  knowledge_exam <- factor(knowledge_exam)
+  teaching_skill_exam <- factor(teaching_skill_exam)
+})
+
+# data check
+head(sdata, 10)
+
+```
+
+```{r sdata_var_labels}
+
+#generate list of variable labels in main frame
+
+#tq frame
+var_label(sdata) <- list( 
+  loc = "State",
+  per_hs = "Percent of Pop with High School Diploma by 25",
+  per_ba = "Percent of Pop with Bachelors Degree by 25",
+  read_avg = "NAEP READ Average Score",
+  read_moe_navg = "Did State Meet or Exceed Nat'l Avg in Reading?",
+  read_per_basic= "NAEP READ Percent at Basic or Higher",
+  read_per_prof= "NAEP READ Percent at Proficient or Higher",
+  math_avg = "NAEP MATH Average Score",
+  math_moe_navg = "Did State Meet or Exceed Nat'l Avg in Math?",
+  math_per_basic= "NAEP MATH Percent at Basic or Higher",
+  math_per_prof= "NAEP MATH Percent at Proficient or Higher",
+  both_moe_navg = "Did State Meet or Exceed Nat'l Avg in Both Subjects?",
+  percap_total= "State Total Spending Per Capita",
+  percap_prim_ed= "State Spending on Primary Education Per Capita",
+  percap_higher_ed= "State Spending on Primary Education Per Capita",
+  teacher_pay= "Average Teacher Salary (National Avg - 1)",
+  pup_teach_ratio= "Average Pupil to Teacher Ratio",
+  fte_teacher_total= "Total Full-time Equivalent Teachers in State",
+  min_hours_by8th = "Minimum Instructional Hours by 8th Grade",
+  mand_attend_age= "Compulsory Attendance Age",
+  dist_req_k_offered= "State mandates for kindergarten offerings",
+  k_attend_req= "Is kindergarten attendance required?",
+  knowledge_exam = "Knowledge Exam Requirements for Cert.",
+  teaching_skill_exam = "Teaching Skill Exam Requirements for Cert.",
+  dem_rep_ratio_16 = "Total Votes Cast Ratio 2016 (D:R)",
+  dem_rep_ratio_20 = "Total Votes Cast Ratio 2020 (D:R)",
+  dtr_shift = "Shift in D:R Ratio 2016-2020",
+  percap_title1_funds = "Title 1 Funds Per Student"
+)
+```
+
+```{r function def correlation matrix gen }
+# similar to last code block but smarter frames...
+
+#and a function wrapper to speed things along
+
+generate_plots <- function(seed){ #seed is frame to plot
+  #outer loop controls x var in correlation plots
+  for (xvar in seed) {
+    #inner loop plots var as x against all other vars in frame
+    for (yvar in seed) {
+      if(!setequal(xvar,yvar)){
+        plot(xvar,yvar, xlab = var_label(xvar),ylab = var_label(yvar))
+        abline(lm(yvar~xvar))
+      }
+    }
+  } 
+}
+
+```
+
+```{r function def for assessing lm performance}
+
+assess_lm<-function(model){
+  print(summary(model))
+  
+  fitted_values <- fitted.values(model)
+  residuals <- residuals(model)
+  
+  # histogram of residuals 
+  # adapted from https://www.statology.org/histogram-of-residuals-in-r/
+  #FIXME WHY U NO SHOW UP HUH???
+  # ggplot(data = sdata, aes(x = residuals)) +
+  #   geom_histogram(bins = 15, fill = 'grey', color = 'black') +
+  #   labs(title = 'Histogram of Residuals', x = 'Residuals', y = 'Frequency')
+  
+  #histogram of residuals
+  hist(residuals)
+  
+  # Plot residuals v. fitted
+  plot(fitted_values, residuals, 
+       main = "Residuals against Fitted Values",
+       xlab = "Fitted Values", ylab = "Residuals",
+       col="blue")
+  
+  # Q-Q normal plot
+  qqnorm(residuals, pch = 19, col="blue", frame = FALSE)
+  qqline(residuals, col = "red", lwd = 2)
+}
+
+```
+
+```{r extending assess_lm to show loess curves for quadratic factor? Assessing logistic regression performance? how to functionify?}
+#a project for post deadline
+```
+
+```{r correlation_checking}
+
+
+hours_vars <- c("min_hours_by8th", "read_per_basic", "math_per_basic", "per_hs" )
+h_frame <- sdata[hours_vars]
+
+generate_plots(h_frame)
+```
+
+```{r query into political environment effects for shiggles}
+
+pol_frame_vars <- c("dem_rep_ratio_16","dem_rep_ratio_20","dtr_shift", 
+                    "percap_prim_ed","percap_title1_funds","per_ba")
+
+pol_frame <- sdata[pol_frame_vars]
+
+generate_plots(pol_frame)
+
+```
+
+```{r nested_lm_pol}
+###
+# list of nested models for anova
+###
+
+ppe1 <- lm (per_ba ~ teacher_pay, 
+                 data = sdata)
+
+ppe2 <- lm (per_ba ~ teacher_pay + pup_teach_ratio,
+                 data = sdata)
+
+ppe3 <- lm (per_ba ~ teacher_pay + pup_teach_ratio + dem_rep_ratio_20, 
+                 data = sdata)
+
+ppe4 <- lm (per_ba ~ teacher_pay + pup_teach_ratio + dem_rep_ratio_20 + 
+                   min_hours_by8th, data = sdata)
+
+ppe5 <- lm (per_ba ~ teacher_pay + pup_teach_ratio + dem_rep_ratio_20 + 
+                   min_hours_by8th + teaching_skill_exam,
+                 data = sdata)
+
+ppe7 <- lm (per_ba ~ teacher_pay + pup_teach_ratio + dem_rep_ratio_20 + 
+                   min_hours_by8th + mand_attend_age, 
+                 data = sdata)
+
+
+```
+
+```{r lm_pol}
+
+pb_pol_ed <- lm (per_ba ~ teacher_pay + pup_teach_ratio + dem_rep_ratio_20 + 
+                   min_hours_by8th + teaching_skill_exam + mand_attend_age, 
+                 data = sdata)
+
+
+ldply(list(ppe3,ppe4), model_fit_stats)
+
+#assess_lm(pb_pol_ed)
+
+```
+
+`{# {r anova runs} #  # anova(ppe7,pb_pol_ed,test='F')`

@@ -1,0 +1,255 @@
+---
+title: "Modeling Variations in State Education Attainment"
+subtitle: "Consolidated analysis notebook"
+author: "Violet Borrero"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: kable
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 6)
+```
+
+## About this notebook
+
+This notebook reproduces the analysis in *Modeling Variations in State Education Attainment* (SNHU MAT 430, December 2023) from a single, runnable file.
+
+**How it was made.** The original analysis was done in stages across several RStudio notebooks in fall 2023 (`education_notebook_v3.Rmd` and `disaster101.Rmd`, kept in `archive/`), with some steps run directly in the console. In 2026, I worked with Claude, Anthropic's AI assistant, to consolidate that work. Claude assembled this notebook from my original code, and we checked every reported figure against the final paper.
+
+**What is original:** the research question, dataset, variable choices, model, and analysis logic, along with the helper functions and the sensitivity analysis.
+
+**What changed in consolidation:**
+
+- Data loads from the repository's CSV using a relative path, instead of a local Excel file.
+- Functions are defined before use, so the notebook runs top to bottom in a fresh session.
+- The nested ANOVA and VIF steps reported in the paper, which weren't saved in the original notebooks, are written out here.
+- Exploratory sections are trimmed to the steps that led to the final model.
+
+Analytical choices from 2023 are kept as they were, including known issues. Those are flagged in **Reproducibility notes** so the paper's results can be reproduced exactly.
+
+## 1. Setup
+
+```{r libraries}
+library(ggplot2)
+library(GGally)     # correlation plot matrices
+library(pROC)       # ROC curves and AUC for logistic models
+library(plyr)       # ldply() for model comparison tables
+library(car)        # vif()
+library(sensemakr)  # sensitivity analysis to unobserved confounding
+```
+
+```{r load-data}
+state_data <- read.csv("data/MAT430_Education_all_data_sans_dc.csv")
+
+# convert categorical variables to factors
+# (codes are documented in data/MAT430_Education_variable_dictionary.csv)
+sdata <- within(state_data, {
+  loc                 <- factor(loc)
+  mand_attend_age     <- factor(mand_attend_age)
+  dist_req_k_offered  <- factor(dist_req_k_offered)
+  k_attend_req        <- factor(k_attend_req)
+  knowledge_exam      <- factor(knowledge_exam)
+  teaching_skill_exam <- factor(teaching_skill_exam)
+})
+
+dim(sdata)  # 50 states x 29 columns (D.C. excluded)
+```
+
+## 2. Helper functions
+
+`assess_lm()` prints a model summary and the three diagnostic plots used in the paper.
+
+```{r fn-assess-lm}
+assess_lm <- function(model) {
+  print(summary(model))
+
+  fitted_values <- fitted.values(model)
+  residuals     <- residuals(model)
+
+  # histogram of residuals
+  hist(residuals, main = "Histogram of Residuals", xlab = "Residuals")
+
+  # residuals against fitted values
+  plot(fitted_values, residuals,
+       main = "Residuals against Fitted Values",
+       xlab = "Fitted Values", ylab = "Residuals", col = "blue")
+  abline(h = 0, lty = 2)
+
+  # normal Q-Q plot
+  qqnorm(residuals, pch = 19, col = "blue", frame = FALSE)
+  qqline(residuals, col = "red", lwd = 2)
+}
+```
+
+PRESS, predictive R², and the model fit summary use functions written by Thomas Hopper. `model_fit_stats()` follows John Mount's tip to return results as data frames.
+
+```{r fn-model-fit}
+# PRESS: predictive residual sum of squares (Thomas Hopper)
+PRESS <- function(linear.model) {
+  pr <- residuals(linear.model) / (1 - lm.influence(linear.model)$hat)
+  sum(pr^2)
+}
+
+# predictive R-squared (Thomas Hopper)
+pred_r_squared <- function(linear.model) {
+  tss <- sum(anova(linear.model)$"Sum Sq")
+  1 - PRESS(linear.model) / tss
+}
+
+# one-row data frame of fit statistics per model
+model_fit_stats <- function(linear.model) {
+  s <- summary(linear.model)
+  data.frame(r.squared      = s$r.squared,
+             adj.r.squared  = s$adj.r.squared,
+             pred.r.squared = pred_r_squared(linear.model),
+             rse            = s$sigma,
+             press          = PRESS(linear.model))
+}
+```
+
+## 3. Correlation screening
+
+Related variables were grouped and plotted against candidate response variables to spot strong relationships, collinearity, and outliers. The percent of a state's population with a bachelor's degree (`per_ba`) was the most responsive outcome.
+
+```{r corr-final-vars, fig.height = 7}
+final_vars <- c("per_ba", "poverty_rate", "teacher_pay",
+                "pup_teach_ratio", "dem_rep_ratio_20")
+
+ggpairs(sdata[final_vars],
+        title = "Final model variables against bachelor's attainment")
+```
+
+```{r corr-other-groups, fig.height = 7}
+# spending and achievement measures
+ggpairs(sdata[c("per_ba", "per_hs", "percap_prim_ed", "percap_title1_funds",
+                "math_avg", "read_avg")],
+        title = "Spending and achievement measures")
+```
+
+## 4. Model type comparison
+
+### Logistic regression
+
+The first model type classified whether a state met or exceeded the national average on the 2022 NAEP exams. This example from the original notebooks uses primary education spending and pupil–teacher ratio to predict meeting the average on both exams.
+
+```{r logistic-example}
+test_logm <- glm(both_moe_navg ~ percap_prim_ed + pup_teach_ratio,
+                 family = "binomial", data = sdata)
+summary(test_logm)
+
+# confusion matrix at a 0.5 threshold
+pred_class <- factor(ifelse(fitted(test_logm) >= 0.5, 1, 0), levels = c(0, 1))
+table(Actual = sdata$both_moe_navg, Predicted = pred_class)
+
+# ROC curve and AUC
+roc_obj <- roc(sdata$both_moe_navg ~ fitted(test_logm))
+round(auc(roc_obj), 4)
+plot(roc_obj, legacy.axes = TRUE, main = "ROC curve: both_moe_navg")
+```
+
+Single-predictor logistic models across the three outcomes:
+
+```{r logistic-auc-table}
+logit_auc <- function(response, predictor) {
+  m <- glm(as.formula(paste(response, "~", predictor)),
+           family = "binomial", data = sdata)
+  as.numeric(auc(roc(sdata[[response]] ~ fitted(m), quiet = TRUE)))
+}
+
+predictors <- c("percap_prim_ed", "teacher_pay", "pup_teach_ratio",
+                "min_hours_by8th", "poverty_rate")
+responses  <- c("read_moe_navg", "math_moe_navg", "both_moe_navg")
+
+auc_table <- sapply(responses, function(r) sapply(predictors, logit_auc, response = r))
+round(auc_table, 3)
+```
+
+### Simple linear regression
+
+Single-predictor linear models with `per_ba` as the response performed better, with several explaining more than half of the variation. This led to a multiple linear regression as the final model type.
+
+```{r simple-linear}
+candidates <- c("poverty_rate", "teacher_pay", "dem_rep_ratio_20",
+                "pup_teach_ratio", "percap_prim_ed", "percap_total",
+                "percap_higher_ed", "percap_title1_funds", "min_hours_by8th")
+
+simple_r2 <- sapply(candidates, function(x)
+  summary(lm(as.formula(paste("per_ba ~", x)), data = sdata))$r.squared)
+
+sort(round(simple_r2, 4), decreasing = TRUE)
+```
+
+## 5. Building the final model
+
+Predictors were added one at a time, and each step was compared using multiple, adjusted, and predictive R², residual standard error, and nested F-tests to guard against overfitting.
+
+```{r nested-models}
+lm1    <- lm(per_ba ~ poverty_rate, data = sdata)
+lm12   <- lm(per_ba ~ poverty_rate + teacher_pay, data = sdata)
+lm123  <- lm(per_ba ~ poverty_rate + teacher_pay + pup_teach_ratio, data = sdata)
+lm1234 <- lm(per_ba ~ poverty_rate + teacher_pay + pup_teach_ratio +
+               dem_rep_ratio_20, data = sdata)
+
+fit_table <- ldply(list(lm1 = lm1, lm12 = lm12, lm123 = lm123, lm1234 = lm1234),
+                   model_fit_stats, .id = "model")
+fit_table[, 2:6] <- round(fit_table[, 2:6], 4)
+fit_table
+```
+
+```{r nested-anova}
+anova(lm1, lm12, lm123, lm1234, test = "F")
+```
+
+## 6. Final model
+
+```{r final-model}
+final_model <- lm1234
+assess_lm(final_model)
+```
+
+Prediction equation from the estimated coefficients:
+
+```{r final-equation}
+b <- round(coef(final_model), 4)
+cat(sprintf("per_ba_hat = %.4f %+.4f(poverty_rate) %+.4f(teacher_pay) %+.4f(pup_teach_ratio) %+.4f(dem_rep_ratio_20)",
+            b[1], b[2], b[3], b[4], b[5]))
+```
+
+### Multicollinearity
+
+```{r vif}
+round(vif(final_model), 4)
+```
+
+All variance inflation factors fall below 2.5, the most conservative common threshold, chosen to offset the small number of observations.
+
+## 7. Sensitivity analysis
+
+How strong would an unobserved confounder need to be to explain away the association between poverty rate and bachelor's attainment? This follows the [sensemakr vignette](https://cran.r-project.org/web/packages/sensemakr/vignettes/sensemakr.html), benchmarking against political lean.
+
+```{r sensemakr}
+poverty_sensitivity <- sensemakr(model = final_model,
+                                 treatment = "poverty_rate",
+                                 benchmark_covariates = "dem_rep_ratio_20",
+                                 kd = 1:3,
+                                 reduce = TRUE)
+
+summary(poverty_sensitivity)
+plot(poverty_sensitivity, sensitivity.of = "t-value")
+```
+
+## Reproducibility notes
+
+These notes document known issues in the 2023 analysis. They are kept here, unchanged, so the paper's results can be reproduced exactly.
+
+- **Missing-value codes.** In the data, `-1` marks a value the source didn't report. Illinois and Utah have `pup_teach_ratio = -1`, and the final model treats those as real values instead of missing. Treating them as missing (n = 48) gives a similar model with a somewhat stronger fit.
+- **Logistic model performance.** The paper describes the logistic models' AUCs as "well under 40%." Rerunning them on this dataset gives AUCs of about 0.51 to 0.83 (section 4), so the logistic models performed better than the paper reports. Linear regression was still the better fit for the research question.
+- **Causal language.** The paper describes the four predictors as "drivers" of attainment. A cross-sectional, observational model like this one supports associations, not causal claims.
+
+```{r session-info}
+sessionInfo()
+```
